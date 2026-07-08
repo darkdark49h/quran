@@ -1,0 +1,800 @@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+
+package com.tor
+
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.lazy.LazyColumn
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.database.sqlite.SQLiteDatabase
+import android.location.Location
+import android.location.LocationManager
+import android.os.Bundle
+import android.os.Looper
+import android.provider.Settings
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.File
+import java.io.FileOutputStream
+import java.time.LocalDate
+import java.util.*
+
+// ==========================================================
+// 1. الثيم - Design Tokens (القسم 1 من الوثيقة)
+// ==========================================================
+
+object PrayerTheme {
+    val BACKGROUND = Color(0xFF0A0A0A)
+    val SURFACE = Color(0xFF141414)
+    val SURFACE_GRADIENT_END = Color(0xFF1C1C1E)
+    val BORDER = Color(0xFF222222)
+    val ACCENT = Color(0xFFD4AF37)
+    val PRIMARY_TEXT = Color(0xFFFFFFFF)
+    val SECONDARY_TEXT = Color(0xFF8E8E93)
+    val INACTIVE = Color(0xFF48484A)
+    val ROW_DIVIDER = Color(0xFF1A1A1A)
+}
+
+// ==========================================================
+// موديلات البيانات (مشتركة بين PrayerActivity.kt و PrayerApp.kt)
+// ==========================================================
+
+data class CityEntry(val id: Int, val name: String, val lat: Double?, val lon: Double?)
+
+data class DayPrayerTimes(
+    val cityId: Int,
+    val hijriMonthName: String,
+    val hijriDay: String,
+    val gregorianDay: String,
+    val gregorianMonth: Int,
+    val fajr: String,
+    val sunrise: String,
+    val dhuhr: String,
+    val asr: String,
+    val maghrib: String,
+    val isha: String
+)
+
+data class PrayerItem(val key: String, val label: String, val icon: String, val time: String, val hasAlarmToggle: Boolean)
+
+internal enum class PageIndex(val index: Int) {
+    HOME(0), PRAYER_TIMES(1), TASBEEH(2), DUAS(3), SETTINGS(4)
+}
+
+// ==========================================================
+// الموقع الجغرافي
+// ==========================================================
+
+internal fun fetchLocationBasic(
+    context: Context,
+    onSuccess: (Double, Double) -> Unit,
+    onFailure: () -> Unit
+) {
+    val hasPermission = ContextCompat.checkSelfPermission(
+        context, Manifest.permission.ACCESS_FINE_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+
+    if (!hasPermission) {
+        onFailure()
+        return
+    }
+
+    try {
+        val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+        for (provider in providers) {
+            if (locationManager.isProviderEnabled(provider)) {
+                val lastLocation = locationManager.getLastKnownLocation(provider)
+                if (lastLocation != null) {
+                    onSuccess(lastLocation.latitude, lastLocation.longitude)
+                    return
+                }
+            }
+        }
+
+        val activeProvider = when {
+            locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) -> LocationManager.GPS_PROVIDER
+            locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) -> LocationManager.NETWORK_PROVIDER
+            else -> null
+        }
+
+        if (activeProvider == null) {
+            onFailure()
+            return
+        }
+
+        locationManager.requestSingleUpdate(activeProvider, object : android.location.LocationListener {
+            override fun onLocationChanged(location: Location) {
+                onSuccess(location.latitude, location.longitude)
+            }
+        }, Looper.getMainLooper())
+
+    } catch (e: SecurityException) {
+        onFailure()
+    } catch (e: Exception) {
+        onFailure()
+    }
+}
+
+// ==========================================================
+// تحميل قاعدة البيانات من GitHub Releases + الاستعلامات
+// ==========================================================
+
+object PrayerDbManager {
+    private const val DB_NAME = "mawakit_maroc_final.db"
+    private const val DB_URL =
+        "https://github.com/darkdark49h/quran/releases/download/v7.1.1/mawakit_maroc_final.5.db"
+
+    private var db: SQLiteDatabase? = null
+
+    fun getDbFile(context: Context): File = context.getDatabasePath(DB_NAME)
+
+    fun isDbAvailable(context: Context): Boolean = getDbFile(context).exists()
+
+    suspend fun downloadDb(context: Context): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val client = OkHttpClient.Builder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+            val request = Request.Builder().url(DB_URL).build()
+            val response = client.newCall(request).execute()
+
+            android.util.Log.d("PrayerDB", "Response code: ${response.code}")
+
+            if (!response.isSuccessful) {
+                android.util.Log.e("PrayerDB", "Failed with code: ${response.code}")
+                return@withContext false
+            }
+
+            val dbFile = getDbFile(context)
+            dbFile.parentFile?.mkdirs()
+
+            val body = response.body ?: return@withContext false
+            body.byteStream().use { input ->
+                FileOutputStream(dbFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            android.util.Log.d("PrayerDB", "Download success, size: ${dbFile.length()}")
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("PrayerDB", "Download error: ${e.message}", e)
+            false
+        }
+    }
+
+    fun getDatabase(context: Context): SQLiteDatabase {
+        db?.let { return it }
+        val dbFile = getDbFile(context)
+        val opened = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
+        db = opened
+        return opened
+    }
+
+    fun getAllCities(context: Context): List<CityEntry> {
+        val database = getDatabase(context)
+        val list = mutableListOf<CityEntry>()
+        val cursor = database.rawQuery("SELECT id, name, lat, lon FROM cities ORDER BY name", null)
+        cursor.use {
+            while (it.moveToNext()) {
+                list.add(
+                    CityEntry(
+                        it.getInt(0), it.getString(1),
+                        if (it.isNull(2)) null else it.getDouble(2),
+                        if (it.isNull(3)) null else it.getDouble(3)
+                    )
+                )
+            }
+        }
+        return list
+    }
+
+    // حساب أقرب مدينة بدقة مطلقة عبر معادلة Haversine
+    fun findNearestCity(context: Context, userLat: Double, userLon: Double): CityEntry? {
+        val cities = getAllCities(context)
+        var nearest: CityEntry? = null
+        var minDist = Double.MAX_VALUE
+        for (c in cities) {
+            if (c.lat == null || c.lon == null) continue
+            val dist = haversineKm(userLat, userLon, c.lat, c.lon)
+            if (dist < minDist) {
+                minDist = dist
+                nearest = c
+            }
+        }
+        return nearest
+    }
+
+    private fun haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6371.0088
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(dLat / 2).let { it * it } +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLon / 2).let { it * it }
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        return r * c
+    }
+
+    // استعلام أوقات الصلاة لأي تاريخ ميلادي (يُستخدم من PrayerApp.kt لدعم التنقل بين الأيام)
+    fun getPrayerTimesForDate(context: Context, cityId: Int, date: LocalDate): DayPrayerTimes? {
+        val gMonth = date.monthValue
+        val gDay = date.dayOfMonth.toString()
+
+        val database = getDatabase(context)
+        val cursor = database.rawQuery(
+            """SELECT city_id, hijri_month_name, hijri_day, gregorian_day, gregorian_month, 
+               fajr, sunrise, dhuhr, asr, maghrib, isha 
+               FROM prayer_times WHERE city_id = ? AND gregorian_month = ? AND gregorian_day = ?""",
+            arrayOf(cityId.toString(), gMonth.toString(), gDay)
+        )
+
+        var result: DayPrayerTimes? = null
+        cursor.use {
+            if (it.moveToFirst()) {
+                result = DayPrayerTimes(
+                    cityId = it.getInt(0), hijriMonthName = it.getString(1),
+                    hijriDay = it.getString(2), gregorianDay = it.getString(3),
+                    gregorianMonth = it.getInt(4), fajr = it.getString(5),
+                    sunrise = it.getString(6), dhuhr = it.getString(7),
+                    asr = it.getString(8), maghrib = it.getString(9), isha = it.getString(10)
+                )
+            }
+        }
+        return result
+    }
+
+    fun getTodayPrayerTimes(context: Context, cityId: Int): DayPrayerTimes? =
+        getPrayerTimesForDate(context, cityId, LocalDate.now())
+}
+
+// ==========================================================
+// أدوات مشتركة: بناء لائحة الصلوات + حساب القادمة + العداد
+// (بدون private حتى يمكن استعمالها من PrayerApp.kt في نفس الـ package)
+// ==========================================================
+
+internal fun buildPrayerList(times: DayPrayerTimes): List<PrayerItem> {
+    return listOf(
+        PrayerItem("fajr", "الفجر", "🕌", times.fajr, hasAlarmToggle = true),
+        PrayerItem("sunrise", "الشروق", "☀️", times.sunrise, hasAlarmToggle = false),
+        PrayerItem("dhuhr", "الظهر", "🕋", times.dhuhr, hasAlarmToggle = true),
+        PrayerItem("asr", "العصر", "📿", times.asr, hasAlarmToggle = true),
+        PrayerItem("maghrib", "المغرب", "🌅", times.maghrib, hasAlarmToggle = true),
+        PrayerItem("isha", "العشاء", "🌌", times.isha, hasAlarmToggle = true)
+    )
+}
+
+internal fun parseTimeToday(time: String): Calendar? {
+    val parts = time.trim().split(":")
+    if (parts.size < 2) return null
+    val h = parts[0].trim().toIntOrNull() ?: return null
+    val m = parts[1].trim().toIntOrNull() ?: return null
+    return Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, h); set(Calendar.MINUTE, m); set(Calendar.SECOND, 0)
+    }
+}
+
+internal fun findNextPrayer(items: List<PrayerItem>): Pair<PrayerItem, Calendar> {
+    val now = Calendar.getInstance()
+    for (item in items) {
+        val cal = parseTimeToday(item.time) ?: continue
+        if (cal.after(now)) return item to cal
+    }
+    val first = items.first()
+    val cal = parseTimeToday(first.time) ?: Calendar.getInstance()
+    cal.add(Calendar.DAY_OF_MONTH, 1)
+    return first to cal
+}
+
+internal fun formatRemaining(target: Calendar): String {
+    val now = Calendar.getInstance()
+    val diff = (target.timeInMillis - now.timeInMillis) / 1000
+    if (diff < 0) return "00:00:00"
+    val h = diff / 3600
+    val m = (diff % 3600) / 60
+    val s = diff % 60
+    return String.format("%02d:%02d:%02d", h, m, s)
+}
+
+// ==========================================================
+// حالة تدفق الإقلاع (Splash -> DB -> Location -> Main)
+// ==========================================================
+
+private enum class Screen { SPLASH, DB_SYNC, DB_ERROR, LOCATION_CHOICE, CITY_PICKER, LOADING, MAIN }
+
+@Composable
+private fun DbErrorScreen(onRetry: () -> Unit) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("تعذر الاتصال بالشبكة حالياً", color = PrayerTheme.PRIMARY_TEXT, fontSize = 18.sp)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("تأكد من اتصالك بالإنترنت", color = PrayerTheme.SECONDARY_TEXT, fontSize = 14.sp)
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = onRetry, colors = ButtonDefaults.buttonColors(containerColor = PrayerTheme.ACCENT)) {
+                Text("إعادة المحاولة", color = Color.Black)
+            }
+        }
+    }
+}
+
+// ==========================================================
+// PrayerActivity - الواجهة الرئيسية
+// ==========================================================
+
+class PrayerActivity : ComponentActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        setContent {
+            PrayerAppRoot(
+                fetchLocation = { onSuccess, onFailure ->
+                    fetchLocationBasic(this, onSuccess, onFailure)
+                },
+                onOpenQuran = {
+                    startActivity(Intent(this, MainActivity::class.java))
+                }
+            )
+        }
+    }
+}
+
+// ==========================================================
+// جذر التطبيق - يدير تدفق الإقلاع ثم يعرض HorizontalPager
+// ==========================================================
+
+@Composable
+private fun PrayerAppRoot(
+    fetchLocation: (onSuccess: (Double, Double) -> Unit, onFailure: () -> Unit) -> Unit,
+    onOpenQuran: () -> Unit
+) {
+    val context = LocalContext.current
+    var screen by remember { mutableStateOf(Screen.SPLASH) }
+    var selectedCity by remember { mutableStateOf<CityEntry?>(null) }
+    var todayTimes by remember { mutableStateOf<DayPrayerTimes?>(null) }
+    var allCities by remember { mutableStateOf<List<CityEntry>>(emptyList()) }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            fetchLocation(
+                { lat, lon ->
+                    val nearest = PrayerDbManager.findNearestCity(context, lat, lon)
+                    if (nearest != null) selectedCity = nearest
+                    else screen = Screen.CITY_PICKER
+                },
+                { screen = Screen.CITY_PICKER }
+            )
+        } else {
+            screen = Screen.CITY_PICKER
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        delay(500)
+        if (!PrayerDbManager.isDbAvailable(context)) {
+            screen = Screen.DB_SYNC
+            var success = PrayerDbManager.downloadDb(context)
+            if (!success) {
+                delay(1500)
+                success = PrayerDbManager.downloadDb(context)
+            }
+            if (!success) {
+                screen = Screen.DB_ERROR
+                return@LaunchedEffect
+            }
+        }
+        allCities = withContext(Dispatchers.IO) { PrayerDbManager.getAllCities(context) }
+        screen = Screen.LOCATION_CHOICE
+    }
+
+    LaunchedEffect(selectedCity) {
+        val city = selectedCity ?: return@LaunchedEffect
+        screen = Screen.LOADING
+        val times = withContext(Dispatchers.IO) { PrayerDbManager.getTodayPrayerTimes(context, city.id) }
+        todayTimes = times
+        screen = Screen.MAIN
+    }
+
+    when (screen) {
+        Screen.DB_ERROR -> DbErrorScreen(onRetry = { screen = Screen.SPLASH })
+        Screen.SPLASH -> SplashScreen()
+        Screen.DB_SYNC -> DbSyncScreen()
+        Screen.LOCATION_CHOICE -> LocationChoiceScreen(
+            onGpsClick = { locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
+            onManualClick = { screen = Screen.CITY_PICKER }
+        )
+        Screen.CITY_PICKER -> CityPickerScreen(cities = allCities, onCitySelected = { selectedCity = it })
+        Screen.LOADING -> LoadingScreen(selectedCity?.name ?: "")
+        Screen.MAIN -> {
+            val city = selectedCity
+            val times = todayTimes
+            if (city != null && times != null) {
+                MainPagerScreen(
+                    cityId = city.id,
+                    cityName = city.name,
+                    todayTimes = times,
+                    onOpenQuran = onOpenQuran
+                )
+            }
+        }
+    }
+}
+
+// ==========================================================
+// Splash Screen
+// ==========================================================
+
+@Composable
+private fun SplashScreen() {
+    Box(
+        modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND),
+        contentAlignment = Alignment.Center
+    ) {
+        Text("الذكر", color = PrayerTheme.ACCENT, fontSize = 36.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+// ==========================================================
+// شاشة مزامنة قاعدة البيانات (أول تشغيل فقط)
+// ==========================================================
+
+@Composable
+private fun DbSyncScreen() {
+    Box(
+        modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator(color = PrayerTheme.ACCENT)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("جاري تحميل بيانات المواقيت...", color = PrayerTheme.SECONDARY_TEXT, fontSize = 14.sp)
+        }
+    }
+}
+
+// ==========================================================
+// Location Choice Screen
+// ==========================================================
+
+@Composable
+private fun LocationChoiceScreen(onGpsClick: () -> Unit, onManualClick: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND).padding(24.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("حدد موقعك", color = PrayerTheme.PRIMARY_TEXT, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(32.dp))
+
+        Button(
+            onClick = onGpsClick,
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = PrayerTheme.ACCENT)
+        ) {
+            Text("تحديد الموقع تلقائياً (GPS)", color = Color.Black, fontSize = 16.sp)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        OutlinedButton(
+            onClick = onManualClick,
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            border = BorderStroke(1.dp, PrayerTheme.SECONDARY_TEXT)
+        ) {
+            Text("اختيار المدينة يدوياً", color = PrayerTheme.PRIMARY_TEXT, fontSize = 16.sp)
+        }
+    }
+}
+
+// ==========================================================
+// City Picker Screen
+// ==========================================================
+
+@Composable
+private fun CityPickerScreen(cities: List<CityEntry>, onCitySelected: (CityEntry) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(query, cities) {
+        if (query.isBlank()) cities else cities.filter { it.name.contains(query) }
+    }
+
+    Column(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND).padding(16.dp)) {
+        Text("اختر مدينتك", color = PrayerTheme.PRIMARY_TEXT, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(12.dp))
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("ابحث", color = PrayerTheme.SECONDARY_TEXT) },
+            modifier = Modifier.fillMaxWidth(),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = PrayerTheme.PRIMARY_TEXT,
+                unfocusedTextColor = PrayerTheme.PRIMARY_TEXT
+            )
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        LazyColumn {
+            items(filtered) { city ->
+                Text(
+                    text = city.name,
+                    color = PrayerTheme.PRIMARY_TEXT,
+                    fontSize = 18.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onCitySelected(city) }
+                        .padding(vertical = 14.dp)
+                )
+                HorizontalDivider(color = PrayerTheme.SURFACE)
+            }
+        }
+    }
+}
+
+// ==========================================================
+// Loading Screen
+// ==========================================================
+
+@Composable
+private fun LoadingScreen(cityName: String) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator(color = PrayerTheme.ACCENT)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("جاري مزامنة أوقات الصلاة لمدينة $cityName...", color = PrayerTheme.SECONDARY_TEXT, fontSize = 14.sp)
+        }
+    }
+}
+
+// ==========================================================
+// 2. الهيكل العام - HorizontalPager بـ 5 شاشات + BottomBar (القسم 2)
+// ==========================================================
+
+@Composable
+private fun MainPagerScreen(
+    cityId: Int,
+    cityName: String,
+    todayTimes: DayPrayerTimes,
+    onOpenQuran: () -> Unit
+) {
+    val pagerState = rememberPagerState(initialPage = PageIndex.HOME.index) { 5 }
+    val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
+
+    Column(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND)) {
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.weight(1f),
+            userScrollEnabled = true
+        ) { page ->
+            when (page) {
+                PageIndex.HOME.index -> HomeScreen(cityName = cityName, times = todayTimes, onOpenQuran = onOpenQuran)
+                PageIndex.PRAYER_TIMES.index -> PrayerTimesScreen(cityId = cityId, cityName = cityName, initialTimes = todayTimes)
+                PageIndex.TASBEEH.index -> TasbeehScreen()
+                PageIndex.DUAS.index -> DuasScreen()
+                PageIndex.SETTINGS.index -> SettingsScreen()
+            }
+        }
+
+        BottomBar(
+            currentPage = pagerState.currentPage,
+            onPageSelected = { index ->
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                scope.launch { pagerState.animateScrollToPage(index) }
+            }
+        )
+    }
+}
+
+@Composable
+private fun BottomBar(currentPage: Int, onPageSelected: (Int) -> Unit) {
+    val items = listOf(
+        Triple(PageIndex.HOME.index, Icons.Filled.Home, "الرئيسية"),
+        Triple(PageIndex.PRAYER_TIMES.index, Icons.Filled.Schedule, "المواقيت"),
+        Triple(PageIndex.TASBEEH.index, Icons.Filled.RadioButtonChecked, "التسبيح"),
+        Triple(PageIndex.DUAS.index, Icons.Filled.ImportContacts, "الأدعية"),
+        Triple(PageIndex.SETTINGS.index, Icons.Filled.Settings, "الإعدادات")
+    )
+
+    Column(modifier = Modifier.fillMaxWidth().height(80.dp).background(PrayerTheme.SURFACE)) {
+        HorizontalDivider(color = PrayerTheme.BORDER, thickness = 0.5.dp)
+        Row(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items.forEach { (index, icon, label) ->
+                val active = currentPage == index
+                Column(
+                    modifier = Modifier.clickable { onPageSelected(index) },
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        icon, contentDescription = label,
+                        tint = if (active) PrayerTheme.ACCENT else PrayerTheme.INACTIVE,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(label, color = if (active) PrayerTheme.ACCENT else PrayerTheme.INACTIVE, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================
+// 3. الشاشة الرئيسية (Home Screen - القسم 3 من الوثيقة)
+// ==========================================================
+
+@Composable
+private fun HomeScreen(cityName: String, times: DayPrayerTimes, onOpenQuran: () -> Unit) {
+    val prayerItems = remember(times) { buildPrayerList(times) }
+
+    var tick by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            tick = System.currentTimeMillis()
+        }
+    }
+
+    val nextPrayerState by remember(tick, prayerItems) { derivedStateOf { findNextPrayer(prayerItems) } }
+    val (nextItem, nextCal) = nextPrayerState
+    val remainingText by remember(tick) { derivedStateOf { formatRemaining(nextCal) } }
+
+    var quranOpen by remember { mutableStateOf(false) }
+
+    Column(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND)) {
+
+        // الهيدر العلوي - 48.dp
+        Row(
+            modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(cityName, color = PrayerTheme.PRIMARY_TEXT, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "${times.hijriDay} ${times.hijriMonthName} 1448",
+                color = PrayerTheme.SECONDARY_TEXT,
+                fontSize = 14.sp
+            )
+        }
+
+        // الطبقة المركزية الكبرى - Hero Card - 190.dp
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(top = 8.dp)
+                .height(190.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(PrayerTheme.SURFACE, PrayerTheme.SURFACE_GRADIENT_END),
+                        start = Offset(0f, 0f),
+                        end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                    )
+                )
+                .border(BorderStroke(0.5.dp, PrayerTheme.BORDER), RoundedCornerShape(16.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "الصلاة القادمة: صلاة ${nextItem.label}",
+                    color = PrayerTheme.ACCENT,
+                    fontSize = 13.sp
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    remainingText,
+                    color = PrayerTheme.PRIMARY_TEXT,
+                    fontSize = 60.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.LocationOn, contentDescription = null,
+                        tint = PrayerTheme.SECONDARY_TEXT, modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(cityName, color = PrayerTheme.SECONDARY_TEXT, fontSize = 13.sp)
+                }
+            }
+        }
+
+        // بطاقة المصحف الشريف السريعة - 100.dp
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(top = 12.dp)
+                .height(100.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(PrayerTheme.SURFACE)
+                .border(BorderStroke(0.5.dp, PrayerTheme.BORDER), RoundedCornerShape(16.dp))
+                .clickable {
+                    quranOpen = true
+                    onOpenQuran()
+                }
+                .padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("دخول المصحف الشريف", color = PrayerTheme.PRIMARY_TEXT, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Icon(
+                imageVector = if (quranOpen) Icons.Filled.MenuBook else Icons.Filled.Book,
+                contentDescription = null,
+                tint = PrayerTheme.ACCENT,
+                modifier = Modifier.size(28.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+    }
+}
+
+// ==========================================================
+// شاشات مؤقتة (التسبيح والأدعية) - غير مفصلة في الوثيقة بعد
+// ==========================================================
+
+@Composable
+private fun TasbeehScreen() {
+    Box(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND), contentAlignment = Alignment.Center) {
+        Text("التسبيح الرقمي - قريباً", color = PrayerTheme.SECONDARY_TEXT, fontSize = 16.sp)
+    }
+}
+
+@Composable
+private fun DuasScreen() {
+    Box(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND), contentAlignment = Alignment.Center) {
+        Text("الأدعية المأثورة - قريباً", color = PrayerTheme.SECONDARY_TEXT, fontSize = 16.sp)
+    }
+}
+
+// ===================

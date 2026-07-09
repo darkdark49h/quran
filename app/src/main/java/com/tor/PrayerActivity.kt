@@ -54,6 +54,7 @@ import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalDate
+import android.os.Build
 import java.util.*
 
 // ==========================================================
@@ -1221,6 +1222,147 @@ private fun requestPinPrayerWidget(context: Context): Boolean {
     }
 }
 
+
+
+@Composable
+fun WidgetSetupScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var showConfirmDialog by remember { mutableStateOf(false) }
+    var resultMessage by remember { mutableStateOf<String?>(null) }
+
+    Column(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND)) {
+
+        Row(
+            modifier = Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع", tint = PrayerTheme.PRIMARY_TEXT)
+            }
+            Spacer(Modifier.width(4.dp))
+            Text("إضافة الويدجت", color = PrayerTheme.PRIMARY_TEXT, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(Modifier.height(24.dp))
+            Text("اضغط على الويدجت لإضافته إلى شاشتك الرئيسية", color = PrayerTheme.SECONDARY_TEXT, fontSize = 13.sp)
+            Spacer(Modifier.height(16.dp))
+
+            // المعاينة دابا مطابقة للويدجت الحقيقي بالمليمتر
+            WidgetPreview(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(72.dp)
+                    .clickable { showConfirmDialog = true }
+            )
+
+            Spacer(Modifier.height(20.dp))
+            resultMessage?.let {
+                Text(it, color = PrayerTheme.ACCENT, fontSize = 13.sp)
+            }
+        }
+    }
+
+    if (showConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfirmDialog = false },
+            containerColor = PrayerTheme.SURFACE,
+            title = { Text("إضافة الويدجت", color = PrayerTheme.PRIMARY_TEXT) },
+            text = { Text("هل تريد إضافة ويدجت مواقيت الصلاة إلى الشاشة الرئيسية؟", color = PrayerTheme.SECONDARY_TEXT) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showConfirmDialog = false
+                    resultMessage = if (requestPinPrayerWidget(context)) {
+                        "تم إرسال طلب الإضافة، أكّد من نافذة النظام"
+                    } else {
+                        "جهازك لا يدعم الإضافة التلقائية، أضفه يدوياً."
+                    }
+                }) { Text("نعم", color = PrayerTheme.ACCENT) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirmDialog = false }) {
+                    Text("لا", color = PrayerTheme.SECONDARY_TEXT)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun WidgetPreview(modifier: Modifier = Modifier) {
+    // عوض ما نخدمو بـ PrayerItem ونجيبو خطأ، نديرو ليست ديال المعاينة خفيفة
+    val items = listOf(
+        "فجر" to "04:12",
+        "ظهر" to "13:05",
+        "عصر" to "16:42",
+        "مغرب" to "19:58",
+        "عشاء" to "21:20"
+    )
+    val activeIndex = 2 
+
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xD9121212))
+            .border(BorderStroke(0.5.dp, PrayerTheme.BORDER), RoundedCornerShape(16.dp))
+            .padding(horizontal = 12.dp, vertical = 6.dp) // ردينا البادينغ 6.dp باش يتنفس
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("21 محرم 1448", color = Color(0xFF9E9E9E), fontSize = 10.sp)
+            // حيدنا الثواني باش يكون مطابق للواقع
+            Text("- 01:15", color = PrayerTheme.ACCENT, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(2.dp))
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            items.forEachIndexed { index, pair ->
+                val isActive = index == activeIndex
+                val (label, time) = pair
+                
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isActive) {
+                        Column(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF222222))
+                                .padding(vertical = 2.dp, horizontal = 1.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(label, color = Color.White, fontSize = 10.sp)
+                            Text(time, color = PrayerTheme.ACCENT, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(label, color = Color(0xFF9E9E9E), fontSize = 10.sp)
+                            Text(time, color = Color(0xFF9E9E9E), fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// الدالة المصلحة ضد الـ Crash
+private fun requestPinPrayerWidget(context: Context): Boolean {
+    val appWidgetManager = android.appwidget.AppWidgetManager.getInstance(context)
+    val provider = android.content.ComponentName(context, PrayerWidgetReceiver::class.java)
+    
+    // الحل الإجباري باش التطبيق ما يطرطقش فـ الأجهزة القديمة
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (appWidgetManager.isRequestPinAppWidgetSupported) {
+            appWidgetManager.requestPinAppWidget(provider, null, null)
+            true
+        } else false
+    } else {
+        false
+    }
+}
 
 
 

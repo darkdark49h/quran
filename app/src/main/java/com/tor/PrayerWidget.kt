@@ -47,50 +47,61 @@ class PrayerWidgetReceiver : GlanceAppWidgetReceiver() {
 // المنطق الرئيسي للويدجت
 // ==========================================================
 class PrayerWidget : GlanceAppWidget() {
-
-    override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val cityId = getSavedCityId(context)
-        val times = withContext(Dispatchers.IO) {
-            cityId?.let { PrayerDbManager.getTodayPrayerTimes(context, it) }
-        }
-
-        if (times == null) {
-            provideContent { EmptyWidgetContent() }
-            return
-        }
-
-        val allItems = buildPrayerList(times)
-        val fiveItems = allItems.filter { it.key in WIDGET_PRAYER_KEYS }
-            .sortedBy { WIDGET_PRAYER_KEYS.indexOf(it.key) }
-
-        val now = Calendar.getInstance()
-        val (nextItem, nextCal) = findNextPrayer(fiveItems)
-        val lastItem = findLastPrayer(fiveItems, now)
-
-        val headerText: String
-        if (lastItem != null && isWithinTenMinutes(lastItem.calendar, now)) {
-            val diffMinutes = getMinutesDifference(lastItem.calendar, now)
-            headerText = "صلاة ${lastItem.label} منذ ${diffMinutes}د"
-        } else {
-            val diffMillis = nextCal.timeInMillis - now.timeInMillis
-            val hours = TimeUnit.MILLISECONDS.toHours(diffMillis)
-            val minutes = TimeUnit.MILLISECONDS.toMinutes(diffMillis) % 60
-            headerText = String.format("- %02d:%02d", hours, minutes)
-        }
-
-        val activeIndex = fiveItems.indexOfFirst { it.key == nextItem.key }
-        val hijriText = "${times.hijriDay} ${times.hijriMonthName} 1448"
-
-        provideContent {
-            PrayerWidgetContent(
-                hijriText = hijriText,
-                countdownText = headerText,
-                items = fiveItems,
-                activeIndex = activeIndex
-            )
-        }
+	
+	
+	override suspend fun provideGlance(context: Context, id: GlanceId) {
+    val cityId = getSavedCityId(context)
+    val times = withContext(Dispatchers.IO) {
+        cityId?.let { PrayerDbManager.getTodayPrayerTimes(context, it) }
     }
 
+    if (times == null) {
+        provideContent { EmptyWidgetContent() }
+        return
+    }
+
+    val allItems = buildPrayerList(times)
+    val fiveItems = allItems.filter { it.key in WIDGET_PRAYER_KEYS }
+        .sortedBy { WIDGET_PRAYER_KEYS.indexOf(it.key) }
+
+    // إنشاء قائمة الأزواج (PrayerItem, Calendar)
+    val itemsWithCal = fiveItems.mapNotNull { item ->
+        parseTimeToday(item.time)?.let { cal -> item to cal }
+    }
+
+    val now = Calendar.getInstance()
+    val (nextItem, nextCal) = findNextPrayer(fiveItems)
+    val lastItemWithCal = itemsWithCal.reversed().find { (_, cal) ->
+        cal.timeInMillis <= now.timeInMillis
+    }
+
+    val headerText: String
+    if (lastItemWithCal != null && isWithinTenMinutes(lastItemWithCal.second, now)) {
+        val diffMinutes = getMinutesDifference(lastItemWithCal.second, now)
+        headerText = "صلاة ${lastItemWithCal.first.label} منذ ${diffMinutes}د"
+    } else {
+        val diffMillis = nextCal.timeInMillis - now.timeInMillis
+        val hours = TimeUnit.MILLISECONDS.toHours(diffMillis)
+        val minutes = TimeUnit.MILLISECONDS.toMinutes(diffMillis) % 60
+        headerText = String.format("- %02d:%02d", hours, minutes)
+    }
+
+    val activeIndex = fiveItems.indexOfFirst { it.key == nextItem.key }
+    val hijriText = "${times.hijriDay} ${times.hijriMonthName} 1448"
+
+    provideContent {
+        PrayerWidgetContent(
+            hijriText = hijriText,
+            countdownText = headerText,
+            items = fiveItems,
+            activeIndex = activeIndex
+        )
+    }
+}
+	
+	
+
+    
     private fun findLastPrayer(items: List<PrayerItem>, now: Calendar): PrayerItem? {
         return items.reversed().find { it.calendar.timeInMillis <= now.timeInMillis }
     }

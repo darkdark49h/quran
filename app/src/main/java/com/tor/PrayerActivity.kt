@@ -1,3 +1,4 @@
+file:OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 package com.tor
 
 import android.Manifest
@@ -5,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import android.location.Location
 import android.location.LocationManager
 import android.os.Bundle

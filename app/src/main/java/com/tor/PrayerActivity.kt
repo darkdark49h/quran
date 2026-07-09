@@ -1,4 +1,4 @@
-file:OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 package com.tor
 
 import android.Manifest

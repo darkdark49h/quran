@@ -1,9 +1,5 @@
-@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
-
 package com.tor
 
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.lazy.LazyColumn
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -337,6 +333,25 @@ internal fun formatRemaining(target: Calendar): String {
 }
 
 // ==========================================================
+// تخزين بسيط للمدينة المختارة (يُستخدم من طرف PrayerWidget.kt المستقل عن الـ Activity)
+// ==========================================================
+
+private const val PREFS_NAME = "prayer_prefs"
+private const val KEY_CITY_ID = "city_id"
+
+internal fun saveSelectedCityId(context: Context, cityId: Int) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putInt(KEY_CITY_ID, cityId)
+        .apply()
+}
+
+internal fun getSavedCityId(context: Context): Int? {
+    val id = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_CITY_ID, -1)
+    return if (id == -1) null else id
+}
+
+// ==========================================================
 // حالة تدفق الإقلاع (Splash -> DB -> Location -> Main)
 // ==========================================================
 
@@ -376,6 +391,9 @@ class PrayerActivity : ComponentActivity() {
                 },
                 onOpenQuran = {
                     startActivity(Intent(this, MainActivity::class.java))
+                },
+                onOpenQibla = {
+                    startActivity(Intent(this, QiblaActivity::class.java))
                 }
             )
         }
@@ -389,7 +407,8 @@ class PrayerActivity : ComponentActivity() {
 @Composable
 private fun PrayerAppRoot(
     fetchLocation: (onSuccess: (Double, Double) -> Unit, onFailure: () -> Unit) -> Unit,
-    onOpenQuran: () -> Unit
+    onOpenQuran: () -> Unit,
+    onOpenQibla: () -> Unit
 ) {
     val context = LocalContext.current
     var screen by remember { mutableStateOf(Screen.SPLASH) }
@@ -435,6 +454,7 @@ private fun PrayerAppRoot(
     LaunchedEffect(selectedCity) {
         val city = selectedCity ?: return@LaunchedEffect
         screen = Screen.LOADING
+        saveSelectedCityId(context, city.id)
         val times = withContext(Dispatchers.IO) { PrayerDbManager.getTodayPrayerTimes(context, city.id) }
         todayTimes = times
         screen = Screen.MAIN
@@ -458,7 +478,8 @@ private fun PrayerAppRoot(
                     cityId = city.id,
                     cityName = city.name,
                     todayTimes = times,
-                    onOpenQuran = onOpenQuran
+                    onOpenQuran = onOpenQuran,
+                    onOpenQibla = onOpenQibla
                 )
             }
         }
@@ -475,7 +496,7 @@ private fun SplashScreen() {
         modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND),
         contentAlignment = Alignment.Center
     ) {
-        Text("الذكر", color = PrayerTheme.ACCENT, fontSize = 36.sp, fontWeight = FontWeight.Bold)
+        Text("الفرقان", color = PrayerTheme.ACCENT, fontSize = 36.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -599,7 +620,8 @@ private fun MainPagerScreen(
     cityId: Int,
     cityName: String,
     todayTimes: DayPrayerTimes,
-    onOpenQuran: () -> Unit
+    onOpenQuran: () -> Unit,
+    onOpenQibla: () -> Unit
 ) {
     val pagerState = rememberPagerState(initialPage = PageIndex.HOME.index) { 5 }
     val scope = rememberCoroutineScope()
@@ -612,7 +634,7 @@ private fun MainPagerScreen(
             userScrollEnabled = true
         ) { page ->
             when (page) {
-                PageIndex.HOME.index -> HomeScreen(cityName = cityName, times = todayTimes, onOpenQuran = onOpenQuran)
+                PageIndex.HOME.index -> HomeScreen(cityName = cityName, times = todayTimes, onOpenQuran = onOpenQuran, onOpenQibla = onOpenQibla)
                 PageIndex.PRAYER_TIMES.index -> PrayerTimesScreen(cityId = cityId, cityName = cityName, initialTimes = todayTimes)
                 PageIndex.TASBEEH.index -> TasbeehScreen()
                 PageIndex.DUAS.index -> DuasScreen()
@@ -671,7 +693,12 @@ private fun BottomBar(currentPage: Int, onPageSelected: (Int) -> Unit) {
 // ==========================================================
 
 @Composable
-private fun HomeScreen(cityName: String, times: DayPrayerTimes, onOpenQuran: () -> Unit) {
+private fun HomeScreen(
+    cityName: String,
+    times: DayPrayerTimes,
+    onOpenQuran: () -> Unit,
+    onOpenQibla: () -> Unit // زر القبلة الملكي
+) {
     val prayerItems = remember(times) { buildPrayerList(times) }
 
     var tick by remember { mutableStateOf(0L) }
@@ -690,28 +717,42 @@ private fun HomeScreen(cityName: String, times: DayPrayerTimes, onOpenQuran: () 
 
     Column(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND)) {
 
-        // الهيدر العلوي - 48.dp
+        // الهيدر العلوي الموزون بميزان الذهب - 48.dp
         Row(
-            modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(cityName, color = PrayerTheme.PRIMARY_TEXT, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            // اليمين: التاريخ الهجري
             Text(
-                "${times.hijriDay} ${times.hijriMonthName} 1448",
-                color = PrayerTheme.SECONDARY_TEXT,
-                fontSize = 14.sp
+                text = "${times.hijriDay} ${times.hijriMonthName} 1448",
+                color = PrayerTheme.PRIMARY_TEXT,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
             )
+
+            // اليسار: زر القبلة الملكي
+            IconButton(onClick = onOpenQibla) {
+                Icon(
+                    imageVector = Icons.Default.Explore,
+                    contentDescription = "القبلة",
+                    tint = PrayerTheme.SECONDARY_TEXT,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
         }
 
-        // الطبقة المركزية الكبرى - Hero Card - 190.dp
+        // الطبقة المركزية الكبرى - Hero Card
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
                 .padding(top = 8.dp)
                 .height(190.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(24.dp))
                 .background(
                     Brush.linearGradient(
                         colors = listOf(PrayerTheme.SURFACE, PrayerTheme.SURFACE_GRADIENT_END),
@@ -719,45 +760,71 @@ private fun HomeScreen(cityName: String, times: DayPrayerTimes, onOpenQuran: () 
                         end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
                     )
                 )
-                .border(BorderStroke(0.5.dp, PrayerTheme.BORDER), RoundedCornerShape(16.dp)),
+                .border(BorderStroke(0.5.dp, PrayerTheme.BORDER), RoundedCornerShape(24.dp)),
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    "الصلاة القادمة: صلاة ${nextItem.label}",
+                    text = "صلاة ${nextItem.label}",
                     color = PrayerTheme.ACCENT,
-                    fontSize = 13.sp
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium
                 )
-                Spacer(modifier = Modifier.height(10.dp))
+
+                Spacer(modifier = Modifier.height(4.dp))
+
                 Text(
-                    remainingText,
+                    text = nextItem.time,
                     color = PrayerTheme.PRIMARY_TEXT,
-                    fontSize = 60.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 64.sp,
+                    fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace
                 )
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Filled.LocationOn, contentDescription = null,
-                        tint = PrayerTheme.SECONDARY_TEXT, modifier = Modifier.size(14.dp)
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "باقي $remainingText",
+                        color = PrayerTheme.SECONDARY_TEXT,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Normal
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(cityName, color = PrayerTheme.SECONDARY_TEXT, fontSize = 13.sp)
+                    Text(
+                        text = "  •  ",
+                        color = PrayerTheme.BORDER,
+                        fontSize = 13.sp
+                    )
+                    Icon(
+                        imageVector = Icons.Filled.LocationOn,
+                        contentDescription = null,
+                        tint = PrayerTheme.SECONDARY_TEXT,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Text(
+                        text = cityName,
+                        color = PrayerTheme.SECONDARY_TEXT,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Normal
+                    )
                 }
             }
         }
 
-        // بطاقة المصحف الشريف السريعة - 100.dp
+        // بطاقة المصحف الشريف السريعة - 88.dp
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
-                .padding(top = 12.dp)
-                .height(100.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .padding(top = 16.dp)
+                .height(88.dp)
+                .clip(RoundedCornerShape(20.dp))
                 .background(PrayerTheme.SURFACE)
-                .border(BorderStroke(0.5.dp, PrayerTheme.BORDER), RoundedCornerShape(16.dp))
+                .border(BorderStroke(0.5.dp, PrayerTheme.BORDER), RoundedCornerShape(20.dp))
                 .clickable {
                     quranOpen = true
                     onOpenQuran()
@@ -766,12 +833,17 @@ private fun HomeScreen(cityName: String, times: DayPrayerTimes, onOpenQuran: () 
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("دخول المصحف الشريف", color = PrayerTheme.PRIMARY_TEXT, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(
+                text = "دخول المصحف الشريف",
+                color = PrayerTheme.PRIMARY_TEXT,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
             Icon(
                 imageVector = if (quranOpen) Icons.Filled.MenuBook else Icons.Filled.Book,
                 contentDescription = null,
                 tint = PrayerTheme.ACCENT,
-                modifier = Modifier.size(28.dp)
+                modifier = Modifier.size(24.dp)
             )
         }
 
@@ -797,4 +869,359 @@ private fun DuasScreen() {
     }
 }
 
-// ===================
+// ==========================================================
+// 5. مركز التحكم المعزول - شاشة الإعدادات (منيو رئيسي + شاشتين فرعيتين)
+// ==========================================================
+
+private enum class SettingsSubScreen { MENU, AZAN_ALERTS, WIDGET }
+
+@Composable
+private fun SettingsScreen() {
+    var subScreen by remember { mutableStateOf(SettingsSubScreen.MENU) }
+
+    when (subScreen) {
+        SettingsSubScreen.MENU -> SettingsMenuScreen(
+            onOpenAzanAlerts = { subScreen = SettingsSubScreen.AZAN_ALERTS },
+            onOpenWidget = { subScreen = SettingsSubScreen.WIDGET }
+        )
+        SettingsSubScreen.AZAN_ALERTS -> AzanAlertsScreen(onBack = { subScreen = SettingsSubScreen.MENU })
+        SettingsSubScreen.WIDGET -> WidgetSetupScreen(onBack = { subScreen = SettingsSubScreen.MENU })
+    }
+}
+
+// ------------------------------------------------------------
+// المنيو الرئيسي للإعدادات
+// ------------------------------------------------------------
+
+@Composable
+private fun SettingsMenuScreen(onOpenAzanAlerts: () -> Unit, onOpenWidget: () -> Unit) {
+    Column(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND)) {
+
+        Row(
+            modifier = Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("الإعدادات", color = PrayerTheme.PRIMARY_TEXT, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                SettingsMenuRow(
+                    icon = Icons.Filled.Notifications,
+                    title = "إدارة تنبيهات الصلوات والأذان",
+                    subtitle = "الصوت، المؤذن، التنبيهات القبلية",
+                    onClick = onOpenAzanAlerts
+                )
+            }
+            item {
+                SettingsMenuRow(
+                    icon = Icons.Filled.Widgets,
+                    title = "إضافة الويدجت",
+                    subtitle = "أضف مواقيت الصلاة إلى الشاشة الرئيسية",
+                    onClick = onOpenWidget
+                )
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun SettingsMenuRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(72.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(PrayerTheme.SURFACE)
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, contentDescription = null, tint = PrayerTheme.ACCENT, modifier = Modifier.size(24.dp))
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text(title, color = PrayerTheme.PRIMARY_TEXT, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                Text(subtitle, color = PrayerTheme.SECONDARY_TEXT, fontSize = 12.sp)
+            }
+        }
+        Icon(Icons.Filled.ChevronLeft, contentDescription = null, tint = PrayerTheme.SECONDARY_TEXT)
+    }
+}
+
+// ------------------------------------------------------------
+// شاشة تنبيهات الأذان (محتوى شاشة الإعدادات القديمة، منقولة هنا)
+// ------------------------------------------------------------
+
+@Composable
+private fun AzanAlertsScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var volume by remember { mutableStateOf(0.8f) }
+    var fajrPreAlert by remember { mutableStateOf(true) }
+    var otherPreAlert by remember { mutableStateOf(true) }
+    val preAlertMinutes by remember { mutableStateOf(15) }
+
+    Column(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND)) {
+
+        Row(
+            modifier = Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع", tint = PrayerTheme.PRIMARY_TEXT)
+            }
+            Spacer(Modifier.width(4.dp))
+            Text("إعدادات الأذان والتنبيهات", color = PrayerTheme.PRIMARY_TEXT, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(PrayerTheme.SURFACE)
+                        .clickable { /* فتح قائمة اختيار المؤذن */ }
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text("صوت الأذان الافتراضي", color = PrayerTheme.PRIMARY_TEXT, fontSize = 15.sp)
+                        Text(
+                            "الشيخ عبد الباسط عبد الصمد - أذان مكة",
+                            color = PrayerTheme.SECONDARY_TEXT, fontSize = 12.sp
+                        )
+                    }
+                    Icon(Icons.Filled.ChevronLeft, contentDescription = null, tint = PrayerTheme.SECONDARY_TEXT)
+                }
+            }
+
+            item {
+                Row(modifier = Modifier.fillMaxWidth().height(50.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.VolumeUp, contentDescription = null,
+                        tint = PrayerTheme.SECONDARY_TEXT, modifier = Modifier.size(22.dp)
+                    )
+                    Slider(
+                        value = volume,
+                        onValueChange = { volume = it },
+                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                        colors = SliderDefaults.colors(
+                            activeTrackColor = PrayerTheme.ACCENT,
+                            inactiveTrackColor = PrayerTheme.BORDER,
+                            thumbColor = PrayerTheme.ACCENT
+                        )
+                    )
+                    Text("${(volume * 100).toInt()}%", color = PrayerTheme.SECONDARY_TEXT, fontSize = 13.sp)
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("التنبيه القبلي لصلاة الفجر ($preAlertMinutes د)", color = PrayerTheme.PRIMARY_TEXT, fontSize = 14.sp)
+                    Switch(
+                        checked = fajrPreAlert,
+                        onCheckedChange = { fajrPreAlert = it },
+                        colors = SwitchDefaults.colors(checkedTrackColor = PrayerTheme.ACCENT)
+                    )
+                }
+            }
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("التنبيه القبلي لباقي الصلوات ($preAlertMinutes د)", color = PrayerTheme.PRIMARY_TEXT, fontSize = 14.sp)
+                    Switch(
+                        checked = otherPreAlert,
+                        onCheckedChange = { otherPreAlert = it },
+                        colors = SwitchDefaults.colors(checkedTrackColor = PrayerTheme.ACCENT)
+                    )
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(PrayerTheme.SURFACE)
+                        .clickable {
+                            context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                        }
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "تفعيل العمل المستدام في الخلفية",
+                        color = PrayerTheme.ACCENT, fontSize = 15.sp, fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+// ------------------------------------------------------------
+// شاشة إضافة الويدجت - معاينة حية + تأكيد الإضافة إلى الشاشة الرئيسية
+// ------------------------------------------------------------
+
+@Composable
+private fun WidgetSetupScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var showConfirmDialog by remember { mutableStateOf(false) }
+    var resultMessage by remember { mutableStateOf<String?>(null) }
+
+    Column(modifier = Modifier.fillMaxSize().background(PrayerTheme.BACKGROUND)) {
+
+        Row(
+            modifier = Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع", tint = PrayerTheme.PRIMARY_TEXT)
+            }
+            Spacer(Modifier.width(4.dp))
+            Text("إضافة الويدجت", color = PrayerTheme.PRIMARY_TEXT, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(Modifier.height(24.dp))
+            Text("اضغط على الويدجت لإضافته إلى شاشتك الرئيسية", color = PrayerTheme.SECONDARY_TEXT, fontSize = 13.sp)
+            Spacer(Modifier.height(16.dp))
+
+            // معاينة الويدجت - نفس هندسة PrayerWidget.kt (4x1) لكن بـ Compose عادي للمعاينة داخل التطبيق
+            WidgetPreview(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(72.dp)
+                    .clickable { showConfirmDialog = true }
+            )
+
+            Spacer(Modifier.height(20.dp))
+            resultMessage?.let {
+                Text(it, color = PrayerTheme.ACCENT, fontSize = 13.sp)
+            }
+        }
+    }
+
+    if (showConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfirmDialog = false },
+            containerColor = PrayerTheme.SURFACE,
+            title = { Text("إضافة الويدجت", color = PrayerTheme.PRIMARY_TEXT) },
+            text = { Text("هل تريد إضافة ويدجت مواقيت الصلاة إلى الشاشة الرئيسية؟", color = PrayerTheme.SECONDARY_TEXT) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showConfirmDialog = false
+                    resultMessage = if (requestPinPrayerWidget(context)) {
+                        "تم إرسال طلب الإضافة، أكّد من نافذة النظام"
+                    } else {
+                        "جهازك لا يدعم الإضافة التلقائية، أضفه يدوياً من قائمة الويدجتات"
+                    }
+                }) { Text("نعم", color = PrayerTheme.ACCENT) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirmDialog = false }) {
+                    Text("لا", color = PrayerTheme.SECONDARY_TEXT)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun WidgetPreview(modifier: Modifier = Modifier) {
+    val fajr = remember { PrayerItem("fajr", "فجر", "🕌", "04:12", false) }
+    val dhuhr = remember { PrayerItem("dhuhr", "ظهر", "🕋", "13:05", false) }
+    val asr = remember { PrayerItem("asr", "عصر", "📿", "16:42", false) }
+    val maghrib = remember { PrayerItem("maghrib", "مغرب", "🌅", "19:58", false) }
+    val isha = remember { PrayerItem("isha", "عشاء", "🌌", "21:20", false) }
+    val items = remember { listOf(fajr, dhuhr, asr, maghrib, isha) }
+    val activeIndex = 2 // معاينة ثابتة فقط لأغراض العرض
+
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xD9121212))
+            .border(BorderStroke(0.5.dp, PrayerTheme.BORDER), RoundedCornerShape(16.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("21 محرم 1448", color = Color(0xFF9E9E9E), fontSize = 11.sp)
+            Text("- 01:15:30", color = PrayerTheme.ACCENT, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(modifier = Modifier.fillMaxWidth()) {
+            items.forEachIndexed { index, item ->
+                val isActive = index == activeIndex
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isActive) {
+                        Column(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF222222))
+                                .padding(vertical = 4.dp, horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(item.label, color = Color.White, fontSize = 11.sp)
+                            Text(item.time, color = PrayerTheme.ACCENT, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(item.label, color = Color(0xFF9E9E9E), fontSize = 11.sp)
+                            Text(item.time, color = Color(0xFF9E9E9E), fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun requestPinPrayerWidget(context: Context): Boolean {
+    val appWidgetManager = android.appwidget.AppWidgetManager.getInstance(context)
+    val provider = android.content.ComponentName(context, PrayerWidgetReceiver::class.java)
+    return if (appWidgetManager.isRequestPinAppWidgetSupported) {
+        appWidgetManager.requestPinAppWidget(provider, null, null)
+    } else {
+        false
+    }
+}
+
+
+
+
+
+
+
+

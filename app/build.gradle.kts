@@ -74,6 +74,8 @@ dependencies {
 implementation("com.squareup.okhttp3:okhttp:4.12.0")
 implementation("androidx.glance:glance-appwidget:1.1.1")
 implementation("androidx.glance:glance-material3:1.1.1") // اختياري
+implementation("org.osmdroid:osmdroid-android:6.1.20")
+implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
 implementation("androidx.compose.material:material-icons-extended")
     
 

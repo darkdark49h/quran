@@ -47,63 +47,56 @@ class PrayerWidgetReceiver : GlanceAppWidgetReceiver() {
 // المنطق الرئيسي للويدجت
 // ==========================================================
 class PrayerWidget : GlanceAppWidget() {
-	
-	
-	override suspend fun provideGlance(context: Context, id: GlanceId) {
-    val cityId = getSavedCityId(context)
-    val times = withContext(Dispatchers.IO) {
-        cityId?.let { PrayerDbManager.getTodayPrayerTimes(context, it) }
-    }
 
-    if (times == null) {
-        provideContent { EmptyWidgetContent() }
-        return
-    }
+    override suspend fun provideGlance(context: Context, id: GlanceId) {
+        val cityId = getSavedCityId(context)
+        val times = withContext(Dispatchers.IO) {
+            cityId?.let { PrayerDbManager.getTodayPrayerTimes(context, it) }
+        }
 
-    val allItems = buildPrayerList(times)
-    val fiveItems = allItems.filter { it.key in WIDGET_PRAYER_KEYS }
-        .sortedBy { WIDGET_PRAYER_KEYS.indexOf(it.key) }
+        if (times == null) {
+            provideContent { EmptyWidgetContent() }
+            return
+        }
 
-    // إنشاء قائمة الأزواج (PrayerItem, Calendar)
-    val itemsWithCal = fiveItems.mapNotNull { item ->
-        parseTimeToday(item.time)?.let { cal -> item to cal }
-    }
+        val allItems = buildPrayerList(times)
+        val fiveItems = allItems.filter { it.key in WIDGET_PRAYER_KEYS }
+            .sortedBy { WIDGET_PRAYER_KEYS.indexOf(it.key) }
 
-    val now = Calendar.getInstance()
-    val (nextItem, nextCal) = findNextPrayer(fiveItems)
-    val lastItemWithCal = itemsWithCal.reversed().find { (_, cal) ->
-        cal.timeInMillis <= now.timeInMillis
-    }
+        // إنشاء قائمة من الأزواج (PrayerItem, Calendar) لتجنب مشكلة calendar المفقودة
+        val itemsWithCal = fiveItems.mapNotNull { item ->
+            parseTimeToday(item.time)?.let { cal -> item to cal }
+        }
 
-    val headerText: String
-    if (lastItemWithCal != null && isWithinTenMinutes(lastItemWithCal.second, now)) {
-        val diffMinutes = getMinutesDifference(lastItemWithCal.second, now)
-        headerText = "صلاة ${lastItemWithCal.first.label} منذ ${diffMinutes}د"
-    } else {
-        val diffMillis = nextCal.timeInMillis - now.timeInMillis
-        val hours = TimeUnit.MILLISECONDS.toHours(diffMillis)
-        val minutes = TimeUnit.MILLISECONDS.toMinutes(diffMillis) % 60
-        headerText = String.format("- %02d:%02d", hours, minutes)
-    }
+        val now = Calendar.getInstance()
+        val (nextItem, nextCal) = findNextPrayer(fiveItems)
 
-    val activeIndex = fiveItems.indexOfFirst { it.key == nextItem.key }
-    val hijriText = "${times.hijriDay} ${times.hijriMonthName} 1448"
+        val lastItemWithCal = itemsWithCal.reversed().find { (_, cal) ->
+            cal.timeInMillis <= now.timeInMillis
+        }
 
-    provideContent {
-        PrayerWidgetContent(
-            hijriText = hijriText,
-            countdownText = headerText,
-            items = fiveItems,
-            activeIndex = activeIndex
-        )
-    }
-}
-	
-	
+        val headerText: String
+        if (lastItemWithCal != null && isWithinTenMinutes(lastItemWithCal.second, now)) {
+            val diffMinutes = getMinutesDifference(lastItemWithCal.second, now)
+            headerText = "صلاة ${lastItemWithCal.first.label} منذ ${diffMinutes}د"
+        } else {
+            val diffMillis = nextCal.timeInMillis - now.timeInMillis
+            val hours = TimeUnit.MILLISECONDS.toHours(diffMillis)
+            val minutes = TimeUnit.MILLISECONDS.toMinutes(diffMillis) % 60
+            headerText = String.format("- %02d:%02d", hours, minutes)
+        }
 
-    
-    private fun findLastPrayer(items: List<PrayerItem>, now: Calendar): PrayerItem? {
-        return items.reversed().find { it.calendar.timeInMillis <= now.timeInMillis }
+        val activeIndex = fiveItems.indexOfFirst { it.key == nextItem.key }
+        val hijriText = "${times.hijriDay} ${times.hijriMonthName} 1448"
+
+        provideContent {
+            PrayerWidgetContent(
+                hijriText = hijriText,
+                countdownText = headerText,
+                items = fiveItems,
+                activeIndex = activeIndex
+            )
+        }
     }
 
     private fun isWithinTenMinutes(prayerCal: Calendar, now: Calendar): Boolean {
@@ -160,7 +153,7 @@ private fun PrayerWidgetContent(
                 PrayerSlot(
                     item = item,
                     isActive = index == activeIndex,
-                    modifier = GlanceModifier.defaultWeight() 
+                    modifier = GlanceModifier.defaultWeight()
                 )
             }
         }
@@ -222,7 +215,6 @@ private fun EmptyWidgetContent() {
         )
     }
 }
-
 
 
 

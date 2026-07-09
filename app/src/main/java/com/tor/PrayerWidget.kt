@@ -1,6 +1,7 @@
 package com.tor
 
 import android.content.Context
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -11,197 +12,171 @@ import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.cornerRadius
 import androidx.glance.appwidget.provideContent
 import androidx.glance.background
-import androidx.glance.layout.Alignment
-import androidx.glance.layout.Box
-import androidx.glance.layout.Column
-import androidx.glance.layout.Row
-import androidx.glance.layout.Spacer
-import androidx.glance.layout.fillMaxSize
-import androidx.glance.layout.fillMaxWidth
-import androidx.glance.layout.height
-import androidx.glance.layout.padding
-import androidx.glance.layout.width
+import androidx.glance.layout.*
 import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextAlign
 import androidx.glance.text.TextStyle
 import androidx.glance.unit.ColorProvider
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-
-// ==========================================================
-// ثيم الويدجت (نفس منطق PrayerTheme لكن كـ Color مباشرة، Glance ما كيدعمش object composable resolution بنفس طريقة Compose العادي)
-// ==========================================================
+import java.util.Calendar
+import java.util.concurrent.TimeUnit
 
 private object WidgetTheme {
-    val ROOT_BACKGROUND = Color(0xD9121212)
+    val ROOT_BACKGROUND = Color(0xD9121212) // 85% شفافية فخمة
     val ACTIVE_BACKGROUND = Color(0xFF222222)
     val ACCENT = Color(0xFFD4AF37)
     val PRIMARY = Color(0xFFFFFFFF)
     val SECONDARY = Color(0xFF9E9E9E)
 }
 
-// أسماء الصلوات الخمس فقط (بدون الشروق) كما ينص دفتر التحملات
 private val WIDGET_PRAYER_KEYS = listOf("fajr", "dhuhr", "asr", "maghrib", "isha")
-
-// ==========================================================
-// GlanceAppWidgetReceiver - نقطة الدخول التي يسجلها النظام
-// ==========================================================
 
 class PrayerWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = PrayerWidget()
 }
 
-// ==========================================================
-// PrayerWidget - المنطق الرئيسي (4x1)
-// ==========================================================
-
 class PrayerWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        // 5. حساب الفهرس النشط يتم هنا، خارج الـ Composable، قبل أي رسم للواجهة (Zero Variable Re-instantiation)
-        val cityId = getSavedCityId(context)
-        val times = withContext(Dispatchers.IO) {
-            cityId?.let { PrayerDbManager.getTodayPrayerTimes(context, it) }
-        }
-
-        if (times == null) {
-            provideContent { EmptyWidgetContent() }
-            return
-        }
+        val cityId = getSavedCityId(context) ?: return provideContent { EmptyWidgetContent() }
+        val times = PrayerDbManager.getTodayPrayerTimes(context, cityId) ?: return provideContent { EmptyWidgetContent() }
 
         val allItems = buildPrayerList(times)
         val fiveItems = allItems.filter { it.key in WIDGET_PRAYER_KEYS }
             .sortedBy { WIDGET_PRAYER_KEYS.indexOf(it.key) }
 
+        // --- محرك الحسابات الذكي (الـ 10 دقائق ومابعدها) ---
+        val now = Calendar.getInstance()
         val (nextItem, nextCal) = findNextPrayer(fiveItems)
-        val remainingText = formatRemaining(nextCal)
+        val lastItem = findLastPrayer(fiveItems, now)
+
+        val headerText: String
+        if (lastItem != null && isWithinTenMinutes(lastItem.calendar, now)) {
+            // ميزة: صلاة كذا منذ X دقائق
+            val diffMinutes = getMinutesDifference(lastItem.calendar, now)
+            headerText = "صلاة ${lastItem.label} منذ ${diffMinutes}د"
+        } else {
+            // الحساب التنازلي العادي للصلاة القادمة (ساعات ودقائق فقط للحفاظ على الباتري)
+            val diffMillis = nextCal.timeInMillis - now.timeInMillis
+            val hours = TimeUnit.MILLISECONDS.toHours(diffMillis)
+            val minutes = TimeUnit.MILLISECONDS.toMinutes(diffMillis) % 60
+            headerText = String.format("- %02d:%02d", hours, minutes)
+        }
+
         val activeIndex = fiveItems.indexOfFirst { it.key == nextItem.key }
         val hijriText = "${times.hijriDay} ${times.hijriMonthName} 1448"
 
         provideContent {
             PrayerWidgetContent(
                 hijriText = hijriText,
-                countdownText = "- $remainingText",
+                countdownText = headerText,
                 items = fiveItems,
                 activeIndex = activeIndex
             )
         }
     }
+
+    private fun isWithinTenMinutes(prayerCal: Calendar, now: Calendar): Boolean {
+        val diff = now.timeInMillis - prayerCal.timeInMillis
+        return diff in 0..(10 * 60 * 1000)
+    }
+
+    private fun getMinutesDifference(prayerCal: Calendar, now: Calendar): Long {
+        val diff = now.timeInMillis - prayerCal.timeInMillis
+        return TimeUnit.MILLISECONDS.toMinutes(diff)
+    }
 }
 
-// ==========================================================
-// 1. الهيكل الجذري - Column يحتوي طبقتين (الهيدر + شبكة الصلوات)
-// ==========================================================
-
-@androidx.compose.runtime.Composable
+@Composable
 private fun PrayerWidgetContent(
     hijriText: String,
     countdownText: String,
     items: List<PrayerItem>,
     activeIndex: Int
 ) {
+    // تقليص الـ Padding العمودي لـ 6.dp باش نخليو المساحة للأرقام تبان
     Column(
         modifier = GlanceModifier
             .fillMaxSize()
-            .heightIn72()
+            .height(72.dp) 
             .background(WidgetTheme.ROOT_BACKGROUND)
             .cornerRadius(16.dp)
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .padding(horizontal = 12.dp, vertical = 6.dp) 
     ) {
         // الطبقة 1: الهيدر الموحد
-        Row(modifier = GlanceModifier.fillMaxWidth()) {
+        Row(
+            modifier = GlanceModifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 text = hijriText,
-                style = TextStyle(
-                    color = ColorProvider(WidgetTheme.SECONDARY),
-                    fontSize = 11.sp
-                )
+                style = TextStyle(color = ColorProvider(WidgetTheme.SECONDARY), fontSize = 10.sp)
             )
             Spacer(modifier = GlanceModifier.defaultWeight())
             Text(
                 text = countdownText,
-                style = TextStyle(
-                    color = ColorProvider(WidgetTheme.ACCENT),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                style = TextStyle(color = ColorProvider(WidgetTheme.ACCENT), fontSize = 11.sp, fontWeight = FontWeight.Bold)
             )
         }
 
-        // الطبقة 2: شبكة الصلوات الخمس الموحدة
-        Row(modifier = GlanceModifier.fillMaxWidth().padding(top = 6.dp)) {
+        // الطبقة 2: شبكة الصلوات الخمس (تقليص الـ padding الفوقاني لـ 2.dp)
+        Row(
+            modifier = GlanceModifier.fillMaxWidth().padding(top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             items.forEachIndexed { index, item ->
                 PrayerSlot(
                     item = item,
                     isActive = index == activeIndex,
-                    modifier = GlanceModifier.defaultWeight()
+                    modifier = GlanceModifier.defaultWeight(1f) // فرض التساوي الرياضي فـ العرض
                 )
             }
         }
     }
 }
 
-// GlanceModifier ما فيهوش height(72.dp) مباشر بسهولة قابلة لإعادة الاستخدام كـ extension نظيفة، هنا نلتزم بالحد الأقصى المطلوب
-private fun GlanceModifier.heightIn72(): GlanceModifier = this.height(72.dp)
-
-// ==========================================================
-// 4. محرك التمييز المعزول - العنصر النشط فقط يُغلف بـ Box مع خلفية وزوايا دائرية
-// ==========================================================
-
-@androidx.compose.runtime.Composable
+@Composable
 private fun PrayerSlot(item: PrayerItem, isActive: Boolean, modifier: GlanceModifier) {
     val nameColor = if (isActive) WidgetTheme.PRIMARY else WidgetTheme.SECONDARY
     val timeColor = if (isActive) WidgetTheme.ACCENT else WidgetTheme.SECONDARY
     val timeWeight = if (isActive) FontWeight.Bold else FontWeight.Normal
 
-    val slotContent: @androidx.compose.runtime.Composable () -> Unit = {
-        Column(horizontalAlignment = Alignment.Horizontal.CenterHorizontally) {
+    // كبسولة المحتوى مقادة بـ مليمتر لـ الـ Spacing الداخلي
+    val slotContent: @Composable () -> Unit = {
+        Column(
+            modifier = GlanceModifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.Horizontal.CenterHorizontally
+        ) {
             Text(
                 text = item.label,
-                style = TextStyle(color = ColorProvider(nameColor), fontSize = 11.sp, textAlign = TextAlign.Center)
+                style = TextStyle(color = ColorProvider(nameColor), fontSize = 10.sp, textAlign = TextAlign.Center)
             )
+            // حذفنا الفراغات الزايدة، النص غيجي ديريكت تحت خوه
             Text(
                 text = item.time,
-                style = TextStyle(color = ColorProvider(timeColor), fontSize = 12.sp, fontWeight = timeWeight, textAlign = TextAlign.Center)
+                style = TextStyle(color = ColorProvider(timeColor), fontSize = 11.sp, fontWeight = timeWeight, textAlign = TextAlign.Center)
             )
         }
     }
 
     if (isActive) {
+        // الـ Active Box واخد بادينغ خفيف بزاف (2.dp) باش ما يقجش النص لداخل
         Box(
             modifier = modifier
                 .background(WidgetTheme.ACTIVE_BACKGROUND)
                 .cornerRadius(8.dp)
-                .padding(vertical = 4.dp, horizontal = 2.dp),
+                .padding(vertical = 2.dp, horizontal = 1.dp),
             contentAlignment = Alignment.Center
         ) { slotContent() }
     } else {
         Box(
-            modifier = modifier.padding(vertical = 4.dp, horizontal = 2.dp),
+            modifier = modifier.padding(vertical = 2.dp, horizontal = 1.dp),
             contentAlignment = Alignment.Center
         ) { slotContent() }
     }
 }
 
-// ==========================================================
-// حالة فارغة - لا مدينة محفوظة بعد (المستخدم ما فتحش التطبيق أول مرة)
-// ==========================================================
 
-@androidx.compose.runtime.Composable
-private fun EmptyWidgetContent() {
-    Box(
-        modifier = GlanceModifier
-            .fillMaxSize()
-            .height(72.dp)
-            .background(WidgetTheme.ROOT_BACKGROUND)
-            .cornerRadius(16.dp)
-            .padding(horizontal = 14.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = "افتح تطبيق الفرقان لعرض مواقيت الصلاة",
-            style = TextStyle(color = ColorProvider(WidgetTheme.SECONDARY), fontSize = 12.sp, textAlign = TextAlign.Center)
-        )
-    }
-}
+
+
+

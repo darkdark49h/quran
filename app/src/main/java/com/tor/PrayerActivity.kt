@@ -1,6 +1,7 @@
 @file:OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 package com.tor
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import android.Manifest
 import android.content.Context
 import android.content.Intent
